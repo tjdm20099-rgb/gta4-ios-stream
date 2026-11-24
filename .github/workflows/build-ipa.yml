@@ -38,10 +38,10 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             clean build
 
-      - name: Ad-hoc sign and package GTA4Stream.ipa
+      - name: Ad-hoc sign with increased-memory entitlements and package GTA4Stream.ipa
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/GTA4Stream.app"
-          codesign --force --deep --sign - "$APP_PATH"
+          codesign --force --deep --sign - --entitlements GTA4Stream/GTA4Stream.entitlements "$APP_PATH"
           rm -rf Payload GTA4Stream.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
@@ -55,10 +55,10 @@ jobs:
           path: GTA4Stream.ipa
           if-no-files-found: error
 
-      - name: Publish Release IPA
+      - name: Publish Release IPA v2.0.0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view v1.0.0 >/dev/null 2>&1 \
-            && gh release upload v1.0.0 GTA4Stream.ipa --clobber \
-            || gh release create v1.0.0 GTA4Stream.ipa --title "GTA IV iOS Stream Client v1.0.0" --notes "Sideloadable iOS .ipa streaming GTA IV from 204.12.199.24:4444 with custom GTA IV mobile controls."
+          gh release view v2.0.0 >/dev/null 2>&1 \
+            && gh release upload v2.0.0 GTA4Stream.ipa --clobber \
+            || gh release create v2.0.0 GTA4Stream.ipa --title "GTA IV iOS v2.0.0 — Direct Phone Install & Play + Stream" --notes "v2.0.0: Install GTA IV directly onto your iPhone/iPad from 204.12.199.24:4444 and play locally (offline-capable via embedded localhost COOP/COEP WebGPU server + increased-memory-limit entitlements), or stream from server."

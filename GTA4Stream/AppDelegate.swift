@@ -1,4 +1,5 @@
 import UIKit
+import Darwin
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -8,7 +9,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        signal(SIGPIPE, SIG_IGN)
         application.isIdleTimerDisabled = true
+        LocalGameServer.shared.start()
+
         let win = UIWindow(frame: UIScreen.main.bounds)
         win.backgroundColor = .black
         win.rootViewController = StreamViewController()

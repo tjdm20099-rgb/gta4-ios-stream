@@ -5,8 +5,8 @@ options:
     iOS: "15.0"
 settings:
   base:
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "2.0.0"
+    CURRENT_PROJECT_VERSION: "2"
     SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_IDENTITY: ""
@@ -18,6 +18,8 @@ targets:
     platform: iOS
     sources:
       - path: GTA4Stream
+        excludes:
+          - "*.entitlements"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.libertyrecomp.gta4stream
