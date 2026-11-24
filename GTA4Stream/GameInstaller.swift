@@ -245,7 +245,7 @@ final class GameInstaller {
 
             var finished = false
             try chunk.withUnsafeBytes { rawIn in
-                streamPtr.pointee.src_ptr = rawIn.bindMemory(to: UInt8.self).baseAddress ?? dstBuf
+                streamPtr.pointee.src_ptr = rawIn.bindMemory(to: UInt8.self).baseAddress ?? UnsafePointer(dstBuf)
                 streamPtr.pointee.src_size = chunk.count
 
                 repeat {

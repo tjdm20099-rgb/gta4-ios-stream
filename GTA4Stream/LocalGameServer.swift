@@ -347,7 +347,6 @@ final class LocalGameServer {
         }
 
         let sem = DispatchSemaphore(value: 0)
-        var sentHeaders = false
 
         final class StreamForwarder: NSObject, URLSessionDataDelegate {
             let fd: Int32
@@ -409,7 +408,6 @@ final class LocalGameServer {
         let task = session.dataTask(with: req)
         task.resume()
         _ = sem.wait(timeout: .now() + 300)
-        _ = sentHeaders
         session.finishTasksAndInvalidate()
     }
 }
