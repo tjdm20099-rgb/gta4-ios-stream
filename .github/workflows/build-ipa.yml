@@ -55,10 +55,10 @@ jobs:
           path: GTA4Stream.ipa
           if-no-files-found: error
 
-      - name: Publish Release IPA v2.0.0
+      - name: Publish Release IPA v2.1.0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view v2.0.0 >/dev/null 2>&1 \
-            && gh release upload v2.0.0 GTA4Stream.ipa --clobber \
-            || gh release create v2.0.0 GTA4Stream.ipa --title "GTA IV iOS v2.0.0 — Direct Phone Install & Play + Stream" --notes "v2.0.0: Install GTA IV directly onto your iPhone/iPad from 204.12.199.24:4444 and play locally (offline-capable via embedded localhost COOP/COEP WebGPU server + increased-memory-limit entitlements), or stream from server."
+          gh release view v2.1.0 >/dev/null 2>&1 \
+            && gh release upload v2.1.0 GTA4Stream.ipa --clobber \
+            || gh release create v2.1.0 GTA4Stream.ipa --title "GTA IV iOS v2.1.0 — WebKit Metal Black-Screen & Memory Fix" --notes "Fixes iOS Metal CAMetalLayer black screen (COPY_SRC & requestAnimationFrame presentation), cuts iOS ISO cache RAM by 304 MB, adds WebAssembly memory64 fallback cascade, and handles WKWebView Jetsam recovery."

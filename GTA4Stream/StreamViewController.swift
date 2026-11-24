@@ -27,6 +27,7 @@ final class StreamViewController: UIViewController, WKNavigationDelegate, WKScri
     private let lightHaptic = UIImpactFeedbackGenerator(style: .light)
     private let mediumHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let heavyHaptic = UIImpactFeedbackGenerator(style: .heavy)
+    private var lastBootLogLine: String = "starting"
 
     private var currentHost: String {
         get {
@@ -448,10 +449,20 @@ final class StreamViewController: UIViewController, WKNavigationDelegate, WKScri
             case "medium": mediumHaptic.impactOccurred()
             default: lightHaptic.impactOccurred()
             }
+        } else if type == "bootLog" {
+            if let txt = body["text"] as? String, !txt.isEmpty {
+                lastBootLogLine = txt
+            }
         } else if type == "changeServer" {
             hubOverlay.isHidden = false
             refreshHubState()
         }
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // Prevents a silent black screen if iOS Jetsam terminates WKWebView's WebContent process!
+        hubOverlay.isHidden = false
+        statusLabel.text = "⚠️ iOS stopped the WebKit tab (RAM limit reached after: \(lastBootLogLine)). Tap Play to retry or use ⚡ Stream from Server."
     }
 
     func webView(

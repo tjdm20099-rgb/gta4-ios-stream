@@ -6,6 +6,7 @@ import Compression
 /// optionally downloads the full 7.3 GB GTA IV .iso disc image with HTTP Range resume.
 final class GameInstaller {
     static let shared = GameInstaller()
+    static let currentBundleVersion = "2.1.0"
 
     let baseSupportDir: URL
     let documentsDir: URL
@@ -35,7 +36,9 @@ final class GameInstaller {
 
     var isEngineInstalled: Bool {
         let wasmPath = baseSupportDir.appendingPathComponent("site/gta4.wasm").path
-        return FileManager.default.fileExists(atPath: wasmPath)
+        let verURL = baseSupportDir.appendingPathComponent("bundle-version.txt")
+        let installedVer = (try? String(contentsOf: verURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.fileExists(atPath: wasmPath) && installedVer == Self.currentBundleVersion
     }
 
     func resolvedLocalISOURL() -> URL? {
@@ -190,6 +193,8 @@ final class GameInstaller {
                         try self.decompressDeflateFile(src: deflateURL, dst: tarURL)
                         progress("Installing engine, shaders, PS5 hub & TU8 to phone…", 0.90)
                         let count = try self.extractUSTar(tarURL: tarURL, into: self.baseSupportDir)
+                        let verURL = self.baseSupportDir.appendingPathComponent("bundle-version.txt")
+                        try? Self.currentBundleVersion.write(to: verURL, atomically: true, encoding: .utf8)
                         progress("Installed \(count) GTA IV files on phone!", 1.0)
                         completion(.success(()))
                     } catch {
