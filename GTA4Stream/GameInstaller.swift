@@ -1,37 +1,42 @@
 import Foundation
 import Compression
 
-/// Downloads and installs the GTA IV WebAssembly/WebGPU engine + PS5 hub + TU8
-/// from the host server (204.12.199.24:4444) into persistent phone storage, and
-/// optionally downloads the full 7.3 GB GTA IV .iso disc image with HTTP Range resume.
+/// Manages the on-phone GTA IV Engine Bundle and automatically detects or syncs
+/// an Extracted GTA IV ISO directory (in On My iPhone -> GTA IV or synced from
+/// 204.12.199.24:4444/extracted) so the game plays directly with zero ISO unpacking.
 final class GameInstaller {
     static let shared = GameInstaller()
-    static let currentBundleVersion = "2.1.0"
+    static let currentBundleVersion = "2.2.0"
 
     let baseSupportDir: URL
     let documentsDir: URL
+    let extractedSyncDir: URL
     let isoDir: URL
 
-    private var isoDownloadTask: URLSessionDataTask?
-    private var isoSession: URLSession?
-    private(set) var isDownloadingISO = false
+    private var cancelSyncFlag = false
+    private(set) var isSyncingExtracted = false
+    private var cachedManifestDir: String?
+    private var cachedManifestData: Data?
+    private let cacheLock = NSLock()
 
     private init() {
         let fm = FileManager.default
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         baseSupportDir = appSupport.appendingPathComponent("GTA4Local", isDirectory: true)
         documentsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
+        extractedSyncDir = documentsDir.appendingPathComponent("extracted-iso", isDirectory: true)
         isoDir = documentsDir.appendingPathComponent("GTA4Local/iso", isDirectory: true)
 
         try? fm.createDirectory(at: baseSupportDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: extractedSyncDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: isoDir, withIntermediateDirectories: true)
 
         var resValues = URLResourceValues()
         resValues.isExcludedFromBackup = true
         var mutableBase = baseSupportDir
         try? mutableBase.setResourceValues(resValues)
-        var mutableISO = documentsDir.appendingPathComponent("GTA4Local", isDirectory: true)
-        try? mutableISO.setResourceValues(resValues)
+        var mutableExt = extractedSyncDir
+        try? mutableExt.setResourceValues(resValues)
     }
 
     var isEngineInstalled: Bool {
@@ -41,6 +46,250 @@ final class GameInstaller {
         return FileManager.default.fileExists(atPath: wasmPath) && installedVer == Self.currentBundleVersion
     }
 
+    // MARK: - Extracted ISO Detection & Resolution (On My iPhone -> GTA IV)
+
+    private func directoryContainsDefaultXex(_ dir: URL) -> Bool {
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
+        return items.contains { $0.lowercased() == "default.xex" }
+    }
+
+    /// Searches phone Documents folder for any extracted GTA IV ISO folder containing default.xex.
+    func resolvedLocalExtractedDir() -> URL? {
+        let fm = FileManager.default
+        let directCandidates = [
+            extractedSyncDir,
+            documentsDir.appendingPathComponent("extracted", isDirectory: true),
+            documentsDir.appendingPathComponent("game", isDirectory: true),
+            documentsDir.appendingPathComponent("GTA4Local/extracted", isDirectory: true),
+            documentsDir
+        ]
+        for cand in directCandidates where directoryContainsDefaultXex(cand) {
+            return cand
+        }
+        // Also scan any top-level folder user dropped into Files -> On My iPhone -> GTA IV
+        if let children = try? fm.contentsOfDirectory(at: documentsDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+            for child in children {
+                if (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                   directoryContainsDefaultXex(child) {
+                    return child
+                }
+            }
+        }
+        return nil
+    }
+
+    func invalidateExtractedCache() {
+        cacheLock.lock()
+        cachedManifestDir = nil
+        cachedManifestData = nil
+        cacheLock.unlock()
+    }
+
+    func localExtractedSummary() -> (found: Bool, fileCount: Int, totalBytes: Int64) {
+        guard let data = localExtractedManifestData(),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (obj["ready"] as? Bool) == true else {
+            return (false, 0, 0)
+        }
+        let count = (obj["fileCount"] as? Int) ?? 0
+        let bytes = (obj["totalBytes"] as? NSNumber)?.int64Value ?? 0
+        return (true, count, bytes)
+    }
+
+    func localExtractedManifestData() -> Data? {
+        guard let root = resolvedLocalExtractedDir() else { return nil }
+        let rootStd = root.standardizedFileURL.path
+        cacheLock.lock()
+        if cachedManifestDir == rootStd, let existing = cachedManifestData {
+            cacheLock.unlock()
+            return existing
+        }
+        cacheLock.unlock()
+
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        var files: [[Any]] = []
+        var totalBytes: Int64 = 0
+        var hasXex = false
+        var hasXexp = false
+
+        for case let fileURL as URL in enumerator {
+            guard let vals = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  vals.isRegularFile == true else { continue }
+            let stdPath = fileURL.standardizedFileURL.path
+            guard stdPath.hasPrefix(rootStd + "/") else { continue }
+            let rel = String(stdPath.dropFirst(rootStd.count + 1))
+            if rel.hasSuffix(".ipa") { continue }
+            let sz = Int64(vals.fileSize ?? 0)
+            if rel.lowercased() == "default.xex" { hasXex = true }
+            if rel.lowercased() == "default.xexp" { hasXexp = true }
+            files.append([rel, sz])
+            totalBytes += sz
+        }
+
+        // Include .install-manifest if present
+        let manifestDot = root.appendingPathComponent(".install-manifest")
+        if let attrs = try? fm.attributesOfItem(atPath: manifestDot.path),
+           let sz = attrs[.size] as? NSNumber {
+            files.append([".install-manifest", sz.int64Value])
+        }
+
+        guard hasXex, files.count > 5 else { return nil }
+        let dict: [String: Any] = [
+            "ready": true,
+            "fileCount": files.count,
+            "totalBytes": totalBytes,
+            "hasBaseXex": hasXex,
+            "hasPatchXexp": hasXexp,
+            "files": files
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+        cacheLock.lock()
+        cachedManifestDir = rootStd
+        cachedManifestData = data
+        cacheLock.unlock()
+        return data
+    }
+
+    /// Resolves a relative path inside the phone's local extracted ISO directory (case-insensitive fallback).
+    func resolveExtractedFile(relativePath: String) -> URL? {
+        guard let root = resolvedLocalExtractedDir() else { return nil }
+        let rootStd = root.standardizedFileURL.path
+        let direct = root.appendingPathComponent(relativePath).standardizedFileURL
+        guard direct.path.hasPrefix(rootStd + "/") else { return nil }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: direct.path) { return direct }
+
+        var cur = root
+        for comp in relativePath.split(separator: "/") {
+            let wanted = comp.lowercased()
+            guard let entries = try? fm.contentsOfDirectory(atPath: cur.path),
+                  let match = entries.first(where: { $0.lowercased() == wanted }) else {
+                return nil
+            }
+            cur.appendPathComponent(match)
+        }
+        return fm.fileExists(atPath: cur.path) ? cur : nil
+    }
+
+    // MARK: - Sync Extracted ISO Folder from Server to Phone SSD
+
+    func cancelExtractedSync() {
+        cancelSyncFlag = true
+        isSyncingExtracted = false
+    }
+
+    func deleteLocalExtractedCopy() {
+        cancelExtractedSync()
+        try? FileManager.default.removeItem(at: extractedSyncDir)
+        try? FileManager.default.createDirectory(at: extractedSyncDir, withIntermediateDirectories: true)
+        invalidateExtractedCache()
+    }
+
+    func syncExtractedFolderFromServer(
+        host rawHost: String,
+        progress: @escaping (_ doneFiles: Int, _ totalFiles: Int, _ gotBytes: Int64, _ totalBytes: Int64) -> Void,
+        completion: @escaping (Result<Int, Error>) -> Void
+    ) {
+        if isSyncingExtracted { return }
+        isSyncingExtracted = true
+        cancelSyncFlag = false
+
+        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = (host.hasPrefix("http://") || host.hasPrefix("https://"))
+            ? host.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : "http://\(host)"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                self.isSyncingExtracted = false
+                self.invalidateExtractedCache()
+            }
+            guard let manifestURL = URL(string: base + "/extracted/manifest.json") else {
+                completion(.failure(NSError(domain: "GTA4", code: 20, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])))
+                return
+            }
+            do {
+                let mData = try Data(contentsOf: manifestURL)
+                guard let obj = try JSONSerialization.jsonObject(with: mData) as? [String: Any],
+                      (obj["ready"] as? Bool) == true,
+                      let list = obj["files"] as? [[Any]], !list.isEmpty else {
+                    throw NSError(domain: "GTA4", code: 21, userInfo: [
+                        NSLocalizedDescriptionKey: "Server is still finishing ISO extraction — try again in a minute"
+                    ])
+                }
+
+                let totalBytes = (obj["totalBytes"] as? NSNumber)?.int64Value ?? 1
+                var gotBytes: Int64 = 0
+                let fm = FileManager.default
+                let cfg = URLSessionConfiguration.ephemeral
+                cfg.timeoutIntervalForRequest = 60
+                cfg.timeoutIntervalForResource = 3600
+                let session = URLSession(configuration: cfg)
+                defer { session.finishTasksAndInvalidate() }
+
+                for (idx, item) in list.enumerated() {
+                    if self.cancelSyncFlag {
+                        throw NSError(domain: "GTA4", code: NSURLErrorCancelled, userInfo: [NSLocalizedDescriptionKey: "Paused"])
+                    }
+                    guard item.count >= 2,
+                          let rel = item[0] as? String,
+                          let szNum = item[1] as? NSNumber else { continue }
+                    let expected = szNum.int64Value
+                    let dest = self.extractedSyncDir.appendingPathComponent(rel).standardizedFileURL
+                    guard dest.path.hasPrefix(self.extractedSyncDir.standardizedFileURL.path) else { continue }
+
+                    if let attrs = try? fm.attributesOfItem(atPath: dest.path),
+                       let curSz = attrs[.size] as? NSNumber, curSz.int64Value == expected {
+                        gotBytes += expected
+                        if idx % 15 == 0 { progress(idx + 1, list.count, gotBytes, totalBytes) }
+                        continue
+                    }
+
+                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    let encoded = rel
+                        .split(separator: "/")
+                        .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                        .joined(separator: "/")
+                    guard let fURL = URL(string: base + "/extracted/file/" + encoded) else { continue }
+
+                    let sem = DispatchSemaphore(value: 0)
+                    var dlErr: Error?
+                    let task = session.downloadTask(with: fURL) { tmpURL, resp, err in
+                        defer { sem.signal() }
+                        if let err = err { dlErr = err; return }
+                        guard let http = resp as? HTTPURLResponse, http.statusCode == 200, let tmpURL = tmpURL else {
+                            dlErr = NSError(domain: "GTA4", code: 22, userInfo: [NSLocalizedDescriptionKey: "Failed downloading \(rel)"])
+                            return
+                        }
+                        do {
+                            try? fm.removeItem(at: dest)
+                            try fm.moveItem(at: tmpURL, to: dest)
+                        } catch {
+                            dlErr = error
+                        }
+                    }
+                    task.resume()
+                    _ = sem.wait(timeout: .now() + 600)
+                    if let dlErr = dlErr { throw dlErr }
+
+                    gotBytes += expected
+                    progress(idx + 1, list.count, gotBytes, totalBytes)
+                }
+                completion(.success(list.count))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    // MARK: - Legacy Raw ISO / TU8 Fallbacks & Free Space
+
     func resolvedLocalISOURL() -> URL? {
         let fm = FileManager.default
         let managed = isoDir.appendingPathComponent("gta4.iso")
@@ -48,7 +297,6 @@ final class GameInstaller {
            let sz = attrs[.size] as? NSNumber, sz.int64Value > 100 * 1024 * 1024 {
             return managed
         }
-        // Also support any .iso placed directly into the iOS Files "On My iPhone -> GTA IV" folder!
         if let items = try? fm.contentsOfDirectory(at: documentsDir, includingPropertiesForKeys: [.fileSizeKey]) {
             for item in items where item.pathExtension.lowercased() == "iso" {
                 if let attrs = try? fm.attributesOfItem(atPath: item.path),
@@ -62,28 +310,10 @@ final class GameInstaller {
 
     func resolvedLocalTU8URL() -> URL? {
         let fm = FileManager.default
-        let candidates = [
-            isoDir.appendingPathComponent("tu8"),
-            baseSupportDir.appendingPathComponent("iso/tu8")
-        ]
-        for c in candidates where fm.fileExists(atPath: c.path) {
-            return c
+        for c in [isoDir.appendingPathComponent("tu8"), baseSupportDir.appendingPathComponent("iso/tu8")] {
+            if fm.fileExists(atPath: c.path) { return c }
         }
         return nil
-    }
-
-    func localISOBytes() -> Int64 {
-        if let url = resolvedLocalISOURL(),
-           let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let sz = attrs[.size] as? NSNumber {
-            return sz.int64Value
-        }
-        let part = isoDir.appendingPathComponent("gta4.iso.part")
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: part.path),
-           let sz = attrs[.size] as? NSNumber {
-            return -sz.int64Value // Negative indicates partial resumable download
-        }
-        return 0
     }
 
     func freeDiskBytes() -> Int64 {
@@ -98,14 +328,7 @@ final class GameInstaller {
         return 0
     }
 
-    func deleteLocalISO() {
-        cancelISODownload()
-        let fm = FileManager.default
-        try? fm.removeItem(at: isoDir.appendingPathComponent("gta4.iso"))
-        try? fm.removeItem(at: isoDir.appendingPathComponent("gta4.iso.part"))
-    }
-
-    // MARK: - Engine Bundle Download + Deflate Decompress + Tar Extract
+    // MARK: - Engine Bundle Installer
 
     func installEngineBundle(
         from rawHost: String,
@@ -119,7 +342,7 @@ final class GameInstaller {
             return
         }
 
-        progress("Connecting to \(host) to prepare GTA IV Engine Pack…", 0.02)
+        progress("Connecting to \(host) for GTA IV Engine v2.2…", 0.02)
 
         final class BundleDelegate: NSObject, URLSessionDownloadDelegate {
             let onProgress: (String, Double) -> Void
@@ -191,11 +414,11 @@ final class GameInstaller {
                     do {
                         progress("Decompressing GTA IV Engine archive…", 0.82)
                         try self.decompressDeflateFile(src: deflateURL, dst: tarURL)
-                        progress("Installing engine, shaders, PS5 hub & TU8 to phone…", 0.90)
+                        progress("Installing engine & extracted-ISO mounter…", 0.90)
                         let count = try self.extractUSTar(tarURL: tarURL, into: self.baseSupportDir)
                         let verURL = self.baseSupportDir.appendingPathComponent("bundle-version.txt")
                         try? Self.currentBundleVersion.write(to: verURL, atomically: true, encoding: .utf8)
-                        progress("Installed \(count) GTA IV files on phone!", 1.0)
+                        progress("Installed \(count) GTA IV Engine files!", 1.0)
                         completion(.success(()))
                     } catch {
                         completion(.failure(error))
@@ -221,7 +444,6 @@ final class GameInstaller {
             try? outHandle.close()
         }
 
-        // Check for optional 2-byte RFC 1950 zlib header just in case
         if let peek = try inHandle.read(upToCount: 2), peek.count == 2 {
             let b0 = Int(peek[peek.startIndex])
             let b1 = Int(peek[peek.startIndex + 1])
@@ -315,9 +537,9 @@ final class GameInstaller {
                 continue
             }
 
-            if typeFlag == 53 || fullRel.hasSuffix("/") { // '5' = directory
+            if typeFlag == 53 || fullRel.hasSuffix("/") {
                 try fm.createDirectory(at: targetURL, withIntermediateDirectories: true)
-            } else if typeFlag == 0 || typeFlag == 48 { // '\0' or '0' = regular file
+            } else if typeFlag == 0 || typeFlag == 48 {
                 try fm.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 fm.createFile(atPath: targetURL.path, contents: nil)
                 let out = try FileHandle(forWritingTo: targetURL)
@@ -339,152 +561,5 @@ final class GameInstaller {
             }
         }
         return extracted
-    }
-
-    // MARK: - Resumable 7.3 GB GTA IV Disc (.iso) Downloader
-
-    func cancelISODownload() {
-        isoDownloadTask?.cancel()
-        isoDownloadTask = nil
-        isoSession?.invalidateAndCancel()
-        isoSession = nil
-        isDownloadingISO = false
-    }
-
-    func downloadDiscISO(
-        from rawHost: String,
-        progress: @escaping (_ got: Int64, _ total: Int64, _ mbPerSec: Double) -> Void,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        if isDownloadingISO { return }
-        let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = (host.hasPrefix("http://") || host.hasPrefix("https://")) ? host : "http://\(host)"
-        guard let isoURL = URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/iso/gta4.iso") else {
-            completion(.failure(NSError(domain: "GTA4", code: 10, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])))
-            return
-        }
-
-        let fm = FileManager.default
-        try? fm.createDirectory(at: isoDir, withIntermediateDirectories: true)
-        let partURL = isoDir.appendingPathComponent("gta4.iso.part")
-        let finalURL = isoDir.appendingPathComponent("gta4.iso")
-
-        var existing: Int64 = 0
-        if let attrs = try? fm.attributesOfItem(atPath: partURL.path),
-           let sz = attrs[.size] as? NSNumber {
-            existing = sz.int64Value
-        } else {
-            fm.createFile(atPath: partURL.path, contents: nil)
-        }
-
-        var req = URLRequest(url: isoURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 120)
-        if existing > 0 {
-            req.setValue("bytes=\(existing)-", forHTTPHeaderField: "Range")
-        }
-
-        final class ISODelegate: NSObject, URLSessionDataDelegate {
-            let partURL: URL
-            let finalURL: URL
-            var handle: FileHandle?
-            var written: Int64
-            var expectedTotal: Int64 = 7_835_492_352
-            let startTime = Date()
-            let startBytes: Int64
-            var lastUIUpdate = Date.distantPast
-            let onProgress: (Int64, Int64, Double) -> Void
-            let onDone: (Result<Void, Error>) -> Void
-
-            init(
-                partURL: URL,
-                finalURL: URL,
-                existing: Int64,
-                onProgress: @escaping (Int64, Int64, Double) -> Void,
-                onDone: @escaping (Result<Void, Error>) -> Void
-            ) {
-                self.partURL = partURL
-                self.finalURL = finalURL
-                self.written = existing
-                self.startBytes = existing
-                self.onProgress = onProgress
-                self.onDone = onDone
-            }
-
-            func urlSession(
-                _ session: URLSession,
-                dataTask: URLSessionDataTask,
-                didReceive response: URLResponse,
-                completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
-            ) {
-                guard let http = response as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 206) else {
-                    completionHandler(.cancel)
-                    onDone(.failure(NSError(domain: "GTA4", code: 11, userInfo: [
-                        NSLocalizedDescriptionKey: "GTA IV .iso not ready on server yet"
-                    ])))
-                    return
-                }
-                do {
-                    if http.statusCode == 200 {
-                        FileManager.default.createFile(atPath: partURL.path, contents: nil)
-                        written = 0
-                        expectedTotal = http.expectedContentLength > 0 ? http.expectedContentLength : expectedTotal
-                    } else if http.expectedContentLength > 0 {
-                        expectedTotal = written + http.expectedContentLength
-                    }
-                    let fh = try FileHandle(forWritingTo: partURL)
-                    try fh.seekToEnd()
-                    handle = fh
-                    completionHandler(.allow)
-                } catch {
-                    completionHandler(.cancel)
-                    onDone(.failure(error))
-                }
-            }
-
-            func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-                do {
-                    try handle?.write(contentsOf: data)
-                    written += Int64(data.count)
-                    let now = Date()
-                    if now.timeIntervalSince(lastUIUpdate) >= 0.2 {
-                        lastUIUpdate = now
-                        let elapsed = max(0.1, now.timeIntervalSince(startTime))
-                        let speed = Double(written - startBytes) / 1_048_576.0 / elapsed
-                        onProgress(written, expectedTotal, max(0, speed))
-                    }
-                } catch {
-                    dataTask.cancel()
-                }
-            }
-
-            func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-                try? handle?.close()
-                handle = nil
-                if let error = error {
-                    onDone(.failure(error))
-                    return
-                }
-                do {
-                    try? FileManager.default.removeItem(at: finalURL)
-                    try FileManager.default.moveItem(at: partURL, to: finalURL)
-                    onDone(.success(()))
-                } catch {
-                    onDone(.failure(error))
-                }
-            }
-        }
-
-        isDownloadingISO = true
-        let del = ISODelegate(partURL: partURL, finalURL: finalURL, existing: existing, onProgress: progress) { [weak self] res in
-            self?.isDownloadingISO = false
-            completion(res)
-        }
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 120
-        cfg.timeoutIntervalForResource = 86400
-        let session = URLSession(configuration: cfg, delegate: del, delegateQueue: nil)
-        isoSession = session
-        let task = session.dataTask(with: req)
-        isoDownloadTask = task
-        task.resume()
     }
 }

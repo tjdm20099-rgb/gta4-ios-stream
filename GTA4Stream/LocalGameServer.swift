@@ -208,9 +208,33 @@ final class LocalGameServer {
         }
         if cleanPath == "/api/status" {
             let json = """
-            {"type":"status","ip":"localhost","port":\(port),"isoReady":true,"tu8Ready":true,"hostConnected":true,"ipaAvailable":true}
+            {"type":"status","ip":"localhost","port":\(port),"isoReady":true,"extractedReady":true,"tu8Ready":true,"hostConnected":true,"ipaAvailable":true}
             """
             sendSimple(fd, status: "200 OK", contentType: "application/json; charset=utf-8", body: Data(json.utf8), headOnly: headOnly)
+            return
+        }
+
+        // Direct Extracted-ISO Mount endpoints (/extracted/manifest.json & /extracted/file/<relPath>)
+        // Checks local phone extracted folder first (On My iPhone -> GTA IV), then falls back to server!
+        if cleanPath == "/extracted/manifest.json" {
+            if let localManifest = GameInstaller.shared.localExtractedManifestData() {
+                sendSimple(fd, status: "200 OK", contentType: "application/json; charset=utf-8", body: localManifest, headOnly: headOnly)
+            } else {
+                proxyFromRemote(fd, remotePath: "/extracted/manifest.json", rangeHeader: nil, headOnly: headOnly)
+            }
+            return
+        }
+        if cleanPath.hasPrefix("/extracted/file/") {
+            let relPath = String(cleanPath.dropFirst("/extracted/file/".count))
+            if let localFile = GameInstaller.shared.resolveExtractedFile(relativePath: relPath) {
+                serveLocalFile(fd, fileURL: localFile, rangeHeader: rangeHeader, headOnly: headOnly)
+            } else {
+                let encoded = relPath
+                    .split(separator: "/")
+                    .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+                    .joined(separator: "/")
+                proxyFromRemote(fd, remotePath: "/extracted/file/" + encoded, rangeHeader: rangeHeader, headOnly: headOnly)
+            }
             return
         }
 

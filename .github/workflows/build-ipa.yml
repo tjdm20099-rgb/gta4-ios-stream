@@ -55,10 +55,10 @@ jobs:
           path: GTA4Stream.ipa
           if-no-files-found: error
 
-      - name: Publish Release IPA v2.1.0
+      - name: Publish Release IPA v2.2.0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view v2.1.0 >/dev/null 2>&1 \
-            && gh release upload v2.1.0 GTA4Stream.ipa --clobber \
-            || gh release create v2.1.0 GTA4Stream.ipa --title "GTA IV iOS v2.1.0 — WebKit Metal Black-Screen & Memory Fix" --notes "Fixes iOS Metal CAMetalLayer black screen (COPY_SRC & requestAnimationFrame presentation), cuts iOS ISO cache RAM by 304 MB, adds WebAssembly memory64 fallback cascade, and handles WKWebView Jetsam recovery."
+          gh release view v2.2.0 >/dev/null 2>&1 \
+            && gh release upload v2.2.0 GTA4Stream.ipa --clobber \
+            || gh release create v2.2.0 GTA4Stream.ipa --title "GTA IV iOS v2.2.0 — Direct Extracted-ISO Play" --notes "Automatically detects and mounts an extracted GTA IV ISO folder (from On My iPhone -> GTA IV or from 204.12.199.24:4444/extracted) so GTA IV plays directly without running disc extraction."
