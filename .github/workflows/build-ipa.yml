@@ -1,0 +1,64 @@
+name: Build GTA4Stream iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode project
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build unsigned Release iOS .app
+        run: |
+          xcodebuild \
+            -project GTA4Stream.xcodeproj \
+            -scheme GTA4Stream \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            clean build
+
+      - name: Ad-hoc sign and package GTA4Stream.ipa
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/GTA4Stream.app"
+          codesign --force --deep --sign - "$APP_PATH"
+          rm -rf Payload GTA4Stream.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r9 GTA4Stream.ipa Payload
+          ls -lh GTA4Stream.ipa
+
+      - name: Upload GTA4Stream.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GTA4Stream-iOS-IPA
+          path: GTA4Stream.ipa
+          if-no-files-found: error
+
+      - name: Publish Release IPA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view v1.0.0 >/dev/null 2>&1 \
+            && gh release upload v1.0.0 GTA4Stream.ipa --clobber \
+            || gh release create v1.0.0 GTA4Stream.ipa --title "GTA IV iOS Stream Client v1.0.0" --notes "Sideloadable iOS .ipa streaming GTA IV from 204.12.199.24:4444 with custom GTA IV mobile controls."
